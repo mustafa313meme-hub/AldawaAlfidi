@@ -1,0 +1,46 @@
+# DOMAIN comes from .env.production (e.g. erp.example.com). Caddy obtains and renews the TLS certificate by itself.
+# One origin serves both the admin app (static files) and the API, so the browser needs no CORS and the CSP can stay at 'self'.
+{$DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	handle /api/* {
+		request_body {
+			max_size 3MB
+		}
+		reverse_proxy api:3000 {
+			# the API trusts exactly one proxy hop (trust proxy = 1) to read the real client IP for rate limiting
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
+	# the representative app (PWA): sw.js and the manifest must never be cached, or a release would not reach phones
+	handle_path /rep/* {
+		root * /srv/rep
+		@private path /test/* /README.md
+		respond @private 404
+		header Cache-Control "no-cache"
+		file_server
+	}
+
+	# the admin app: static files, never cached for long (a new release must reach users at once)
+	handle {
+		root * /srv/admin
+		@private path /test/* /README.md
+		respond @private 404
+		header Cache-Control "no-cache"
+		file_server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

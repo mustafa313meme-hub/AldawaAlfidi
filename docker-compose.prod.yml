@@ -1,0 +1,76 @@
+# Production stack: Caddy (automatic HTTPS) -> API -> PostgreSQL. Only Caddy publishes ports; the database is unreachable from outside.
+#
+#   cp .env.example .env.production      # fill every value; NEVER commit it
+#   docker compose -f docker-compose.prod.yml --env-file .env.production --profile tools run --rm migrate
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# Two database roles (see deploy/db-roles.sql): the OWNER role runs migrations, the APP role (DML only, no UPDATE/DELETE on the
+# append-only tables) runs the API.
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # one-off: migrations + triggers/constraints, run with the OWNER role
+  migrate:
+    build: ./apps/api
+    profiles: ["tools"]
+    env_file: .env.production
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public
+    depends_on:
+      db: { condition: service_healthy }
+    command: >
+      sh -c "npx prisma migrate deploy &&
+             npx prisma db execute --file prisma/sql/audit_append_only.sql --schema prisma/schema.prisma &&
+             npx prisma db execute --file prisma/sql/constraints.sql --schema prisma/schema.prisma"
+
+  api:
+    build: ./apps/api
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      APP_ENV: production
+      # the restricted APP role (APP_DB_USER / APP_DB_PASSWORD in .env.production)
+      DATABASE_URL: postgresql://${APP_DB_USER}:${APP_DB_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public
+    depends_on:
+      db: { condition: service_healthy }
+    expose: ["3000"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    command: ["node", "dist/main.js"]
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./apps/admin:/srv/admin:ro        # the admin web app (static files)
+      - ./apps/rep:/srv/rep:ro            # the representative app (PWA) at /rep/
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

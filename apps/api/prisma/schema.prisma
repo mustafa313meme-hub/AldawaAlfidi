@@ -1,0 +1,1011 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Role {
+  id          String           @id @default(uuid())
+  name        String           @unique
+  description String?
+  isSystem    Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  users       User[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id        String           @id @default(uuid())
+  code      String           @unique
+  name      String
+  group     String
+  roles     RolePermission[]
+  overrides UserPermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserPermission {
+  userId       String
+  permissionId String
+  allowed      Boolean
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionId])
+  @@map("user_permissions")
+}
+
+model User {
+  id                 String               @id @default(uuid())
+  username           String               @unique
+  fullName           String
+  phone              String?              @unique
+  email              String?              @unique
+  passwordHash       String
+  roleId             String
+  isActive           Boolean              @default(true)
+  mustChangePassword Boolean              @default(false)
+  failedLoginCount   Int                  @default(0)
+  lockedUntil        DateTime?
+  lastLoginAt        DateTime?
+  deletedAt          DateTime?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  role               Role                 @relation(fields: [roleId], references: [id])
+  permissions        UserPermission[]
+  devices            UserDevice[]
+  refreshTokens      RefreshToken[]
+  resetTokens        PasswordResetToken[]
+
+  managedWarehouses  Warehouse[]
+  representative     Representative?      @relation("RepUser")
+  supervisedReps     Representative[]     @relation("RepSupervisor")
+
+  @@index([roleId])
+  @@map("users")
+}
+
+model UserDevice {
+  id            String         @id @default(uuid())
+  userId        String
+  deviceId      String
+  platform      String?
+  model         String?
+  appVersion    String?
+  buildNumber   String?
+  pushToken     String?
+  isActive      Boolean        @default(true)
+  lastSeenAt    DateTime       @default(now())
+  createdAt     DateTime       @default(now())
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokens RefreshToken[]
+
+  @@unique([userId, deviceId])
+  @@map("user_devices")
+}
+
+model RefreshToken {
+  id          String      @id @default(uuid())
+  userId      String
+  deviceRefId String?
+  familyId    String
+  tokenHash   String      @unique
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  ip          String?
+  userAgent   String?
+  createdAt   DateTime    @default(now())
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device      UserDevice? @relation(fields: [deviceRefId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// Append-only: UPDATE/DELETE/TRUNCATE blocked by trigger (prisma/sql/audit_append_only.sql)
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  action    String
+  entity    String
+  entityId  String?
+  oldValues Json?
+  newValues Json?
+  ip        String?
+  device    String?
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([userId, createdAt])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model Setting {
+  key       String   @id
+  value     Json
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+// ───────── Phase 2: master data ─────────
+
+// Atomic per-key counters (SKU, warehouse code, later invoice/order numbers).
+model Sequence {
+  key   String @id
+  value BigInt @default(0)
+
+  @@map("sequences")
+}
+
+model Company {
+  id            String    @id @default(uuid())
+  name          String    @unique
+  phone         String?
+  email         String?
+  address       String?
+  contactPerson String?
+  paymentTerms  String?
+  notes         String?
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  products      Product[]
+
+  purchaseOrders PurchaseOrder[]
+  @@map("companies")
+}
+
+model Category {
+  id        String     @id @default(uuid())
+  name      String
+  parentId  String?
+  isActive  Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  parent    Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children  Category[] @relation("CategoryTree")
+  products  Product[]
+
+  @@index([parentId])
+  @@map("categories")
+}
+
+// All money fields are integer IQD. Cost fields are hidden without products.view_cost.
+model Product {
+  id             String          @id @default(uuid())
+  sku            String          @unique
+  barcode        String?         @unique
+  nameAr         String
+  nameEn         String?
+  genericName    String?
+  companyId      String
+  categoryId     String?
+  unit           String          @default("علبة")
+  packSize       Int             @default(1)
+  purchasePrice  Int             @default(0)
+  salePrice      Int
+  minSalePrice   Int             @default(0)
+  reorderLevel   Int             @default(0)
+  taxRate        Decimal         @default(0) @db.Decimal(5, 2)
+  bonusEligible  Boolean         @default(true)
+  discountEligible Boolean       @default(true)
+  isActive       Boolean         @default(true)
+  notes          String?
+  searchText     String
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  company        Company         @relation(fields: [companyId], references: [id])
+  category       Category?       @relation(fields: [categoryId], references: [id])
+  priceItems     PriceListItem[]
+
+  stock           Stock[]
+  movements       StockMovement[]
+  bonusRules      BonusRule[]
+  invoiceItems    InvoiceItem[]
+  orderItems      SalesOrderItem[]
+  returnItems     ReturnItem[]
+  batches         StockBatch[]
+  purchaseItems   PurchaseOrderItem[]
+  transferItems   StockTransferItem[]
+  adjustmentItems StockAdjustmentItem[]
+  @@index([companyId])
+  @@index([categoryId])
+  @@index([nameAr])
+  @@map("products")
+}
+
+model PriceList {
+  id          String          @id @default(uuid())
+  name        String          @unique
+  description String?
+  isDefault   Boolean         @default(false)
+  isActive    Boolean         @default(true)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  items       PriceListItem[]
+  customers   Customer[]
+
+  @@map("price_lists")
+}
+
+model PriceListItem {
+  priceListId String
+  productId   String
+  price       Int
+  updatedAt   DateTime  @updatedAt
+  priceList   PriceList @relation(fields: [priceListId], references: [id], onDelete: Cascade)
+  product     Product   @relation(fields: [productId], references: [id])
+
+  @@id([priceListId, productId])
+  @@index([productId])
+  @@map("price_list_items")
+}
+
+model Warehouse {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  code      String   @unique
+  location  String?
+  managerId String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  manager   User?    @relation(fields: [managerId], references: [id])
+
+  stock           Stock[]
+  movements       StockMovement[]
+  invoices        Invoice[]
+  orders          SalesOrder[]
+  returns         Return[]
+  batches         StockBatch[]
+  purchaseOrders  PurchaseOrder[]
+  transfersFrom   StockTransfer[]  @relation("TransferFrom")
+  transfersTo     StockTransfer[]  @relation("TransferTo")
+  adjustments     StockAdjustment[]
+  @@index([managerId])
+  @@map("warehouses")
+}
+
+// ───────── Phase 3: field force ─────────
+
+enum RepStatus { Active Suspended Vacation Inactive }
+enum CustomerType { Pharmacy Doctor Hospital MedicalCenter Distributor Other }
+enum CustomerStatus { Active Suspended Blocked Inactive }
+enum VisitType { Sales Medical FollowUp Collection Other }
+enum VisitLocationStatus { NotProvided Verified PoorAccuracy TooFar NoCustomerLocation }
+enum PlanStatus { Planned Done Skipped Cancelled }
+enum TargetPeriod { Monthly Quarterly Yearly Custom }
+
+model Representative {
+  id            String                   @id @default(uuid())
+  employeeCode  String                   @unique
+  fullName      String
+  phone         String?
+  address       String?
+  nationalId    String?
+  hireDate      DateTime?                @db.Date
+  status        RepStatus                @default(Active)
+  userId        String?                  @unique
+  supervisorId  String?
+  notes         String?
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
+  user          User?                    @relation("RepUser", fields: [userId], references: [id])
+  supervisor    User?                    @relation("RepSupervisor", fields: [supervisorId], references: [id])
+  areas         RepresentativeArea[]
+  customerLinks CustomerRepresentative[]
+  visits        Visit[]
+  plans         VisitPlan[]
+  targets       SalesTarget[]
+
+  invoices      Invoice[]
+  orders        SalesOrder[]
+  payments      Payment[]
+  @@index([supervisorId])
+  @@map("representatives")
+}
+
+model Area {
+  id          String               @id @default(uuid())
+  name        String
+  city        String
+  district    String?
+  description String?
+  isActive    Boolean              @default(true)
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  reps        RepresentativeArea[]
+  customers   Customer[]
+
+  @@unique([city, name])
+  @@map("areas")
+}
+
+// History of who covers which area. Exactly one open row (activeTo IS NULL) per area (see constraints.sql).
+model RepresentativeArea {
+  id               String         @id @default(uuid())
+  representativeId String
+  areaId           String
+  priority         Int            @default(1)
+  activeFrom       DateTime       @default(now())
+  activeTo         DateTime?
+  representative   Representative @relation(fields: [representativeId], references: [id])
+  area             Area           @relation(fields: [areaId], references: [id])
+
+  @@index([representativeId])
+  @@index([areaId])
+  @@map("representative_areas")
+}
+
+// customer balance is NOT stored here: it is derived from LedgerEntries (opening balance + movements).
+model Customer {
+  id              String                   @id @default(uuid())
+  code            String                   @unique
+  name            String
+  customerType    CustomerType             @default(Pharmacy)
+  phone           String?
+  secondaryPhone  String?
+  address         String?
+  city            String?
+  district        String?
+  areaId          String?
+  latitude        Float?
+  longitude       Float?
+  ownerName       String?
+  licenseNumber   String?                  @unique
+  creditLimit     Int                      @default(0)
+  paymentTerms    String?
+  openingBalance  Int                      @default(0)
+  priceListId     String?
+  status          CustomerStatus           @default(Active)
+  notes           String?
+  searchText      String
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+  area            Area?                    @relation(fields: [areaId], references: [id])
+  priceList       PriceList?               @relation(fields: [priceListId], references: [id])
+  representatives CustomerRepresentative[]
+  visits          Visit[]
+  plans           VisitPlan[]
+
+  invoices        Invoice[]
+  orders          SalesOrder[]
+  ledgerEntries   LedgerEntry[]
+  returns         Return[]
+  payments        Payment[]
+  @@index([areaId])
+  @@index([status])
+  @@index([latitude, longitude])
+  @@map("customers")
+}
+
+// Assignment history. At most one open primary row per customer (see constraints.sql).
+model CustomerRepresentative {
+  id               String         @id @default(uuid())
+  customerId       String
+  representativeId String
+  assignedFrom     DateTime       @default(now())
+  assignedTo       DateTime?
+  isPrimary        Boolean        @default(true)
+  customer         Customer       @relation(fields: [customerId], references: [id])
+  representative   Representative @relation(fields: [representativeId], references: [id])
+
+  @@index([customerId])
+  @@index([representativeId, assignedTo])
+  @@map("customer_representatives")
+}
+
+model Visit {
+  id               String              @id @default(uuid())
+  representativeId String
+  customerId       String
+  visitDate        DateTime            @db.Date
+  startTime        DateTime
+  endTime          DateTime?
+  latitude         Float?
+  longitude        Float?
+  accuracyM        Float?
+  locationAt       DateTime?
+  distanceM        Int?
+  locationStatus   VisitLocationStatus @default(NotProvided)
+  visitType        VisitType
+  outcome          String?
+  notes            String?
+  nextVisitDate    DateTime?           @db.Date
+  deviceId         String?
+  localId          String?
+  createdById      String?
+  createdAt        DateTime            @default(now())
+  representative   Representative      @relation(fields: [representativeId], references: [id])
+  customer         Customer            @relation(fields: [customerId], references: [id])
+  plan             VisitPlan?
+
+  @@unique([deviceId, localId])
+  @@index([representativeId, visitDate])
+  @@index([customerId, visitDate])
+  @@map("visits")
+}
+
+model VisitPlan {
+  id               String         @id @default(uuid())
+  representativeId String
+  planDate         DateTime       @db.Date
+  customerId       String
+  priority         Int            @default(0)
+  plannedOrder     Int
+  status           PlanStatus     @default(Planned)
+  visitId          String?        @unique
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  representative   Representative @relation(fields: [representativeId], references: [id])
+  customer         Customer       @relation(fields: [customerId], references: [id])
+  visit            Visit?         @relation(fields: [visitId], references: [id])
+
+  @@unique([representativeId, planDate, customerId])
+  @@index([representativeId, planDate])
+  @@map("visit_plans")
+}
+
+model SalesTarget {
+  id               String         @id @default(uuid())
+  representativeId String
+  periodType       TargetPeriod
+  startDate        DateTime       @db.Date
+  endDate          DateTime       @db.Date
+  targetAmount     Int            @default(0)
+  targetVisits     Int            @default(0)
+  targetOrders     Int            @default(0)
+  notes            String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  representative   Representative @relation(fields: [representativeId], references: [id])
+
+  @@index([representativeId, startDate])
+  @@map("sales_targets")
+}
+
+// ───────── Phase 4: sales core (orders, invoices, bonus, returns) + stock & ledger skeleton ─────────
+
+enum OrderStatus { Draft Submitted Approved Preparing Delivered Cancelled }
+enum InvoiceType { Sale }
+enum InvoiceStatus { Confirmed Cancelled }
+enum PaymentStatus { Unpaid Partial Paid }
+enum DiscountType { Percent Amount }
+enum MovementType { Purchase Sale ReturnIn ReturnOut TransferIn TransferOut AdjustmentIn AdjustmentOut OpeningBalance Damage Expired }
+enum LedgerType { Invoice Return Payment Adjustment Cancellation }
+enum LineType { Sold Bonus BonusBilled }
+enum ItemCondition { Valid Damaged Expired }
+
+model BonusRule {
+  id            String        @id @default(uuid())
+  productId     String
+  minQuantity   Int
+  bonusQuantity Int
+  startDate     DateTime?     @db.Date
+  endDate       DateTime?     @db.Date
+  customerType  CustomerType?
+  isActive      Boolean       @default(true)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  product       Product       @relation(fields: [productId], references: [id])
+
+  @@index([productId, isActive])
+  @@map("bonus_rules")
+}
+
+// Current quantity per warehouse/product. Never edited directly: only together with a StockMovement.
+model Stock {
+  warehouseId String
+  productId   String
+  quantity    Int       @default(0)
+  averageCost Int       @default(0)
+  lastCost    Int       @default(0)
+  updatedAt   DateTime  @updatedAt
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+  product     Product   @relation(fields: [productId], references: [id])
+
+  @@id([warehouseId, productId])
+  @@index([productId])
+  @@map("stock")
+}
+
+// Append-only (trigger). quantity is always positive; direction comes from movementType.
+model StockMovement {
+  id            String       @id @default(uuid())
+  warehouseId   String
+  productId     String
+  movementType  MovementType
+  quantity      Int
+  isBonus       Boolean      @default(false)
+  unitCost      Int?
+  referenceType String?
+  referenceId   String?
+  batchNumber   String?
+  expiryDate    DateTime?    @db.Date
+  note          String?
+  createdById   String?
+  createdAt     DateTime     @default(now())
+  warehouse     Warehouse    @relation(fields: [warehouseId], references: [id])
+  product       Product      @relation(fields: [productId], references: [id])
+
+  @@index([warehouseId, productId])
+  @@index([referenceType, referenceId])
+  @@map("stock_movements")
+}
+
+// Append-only (trigger). Balance = customer.openingBalance + SUM(debit) - SUM(credit).
+model LedgerEntry {
+  id            String     @id @default(uuid())
+  customerId    String
+  entryType     LedgerType
+  debit         Int        @default(0)
+  credit        Int        @default(0)
+  referenceType String?
+  referenceId   String?
+  description   String?
+  createdById   String?
+  entryDate     DateTime   @default(now())
+  createdAt     DateTime   @default(now())
+  customer      Customer   @relation(fields: [customerId], references: [id])
+
+  @@index([customerId, entryDate])
+  @@index([referenceType, referenceId])
+  @@map("ledger_entries")
+}
+
+model SalesOrder {
+  id               String           @id @default(uuid())
+  orderNumber      String           @unique
+  customerId       String
+  representativeId String?
+  warehouseId      String?
+  orderDate        DateTime         @default(now())
+  status           OrderStatus      @default(Draft)
+  subtotal         Int              @default(0)
+  discountTotal    Int              @default(0)
+  bonusValue       Int              @default(0)
+  taxTotal         Int              @default(0)
+  total            Int              @default(0)
+  notes            String?
+  deviceId         String?
+  localId          String?
+  invoiceId        String?          @unique
+  createdById      String?
+  approvedById     String?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  customer         Customer         @relation(fields: [customerId], references: [id])
+  representative   Representative?  @relation(fields: [representativeId], references: [id])
+  warehouse        Warehouse?       @relation(fields: [warehouseId], references: [id])
+  invoice          Invoice?         @relation(fields: [invoiceId], references: [id])
+  items            SalesOrderItem[]
+
+  @@unique([deviceId, localId])
+  @@index([customerId])
+  @@index([representativeId, status])
+  @@map("sales_orders")
+}
+
+model SalesOrderItem {
+  id             String        @id @default(uuid())
+  orderId        String
+  productId      String
+  quantity       Int
+  bonusQuantity  Int           @default(0)
+  unitPrice      Int
+  discountType   DiscountType?
+  discountValue  Int           @default(0)
+  discountAmount Int           @default(0)
+  taxRateBp      Int           @default(0)
+  taxAmount      Int           @default(0)
+  lineTotal      Int
+  order          SalesOrder    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product        Product       @relation(fields: [productId], references: [id])
+
+  @@index([orderId])
+  @@map("sales_order_items")
+}
+
+model Invoice {
+  id               String        @id @default(uuid())
+  invoiceNumber    String        @unique
+  invoiceType      InvoiceType   @default(Sale)
+  customerId       String
+  representativeId String?
+  warehouseId      String
+  invoiceDate      DateTime      @default(now())
+  subtotal         Int
+  discountTotal    Int           @default(0)
+  bonusValue       Int           @default(0)
+  taxTotal         Int           @default(0)
+  netTotal         Int
+  paidAmount       Int           @default(0)
+  returnedAmount   Int           @default(0)
+  remainingAmount  Int
+  paymentStatus    PaymentStatus @default(Unpaid)
+  status           InvoiceStatus @default(Confirmed)
+  notes            String?
+  cancelledAt      DateTime?
+  cancelledById    String?
+  cancelReason     String?
+  createdById      String?
+  approvedById     String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @default(now()) @updatedAt
+  idempotencyKey   String?
+  customer         Customer      @relation(fields: [customerId], references: [id])
+  representative   Representative? @relation(fields: [representativeId], references: [id])
+  warehouse        Warehouse     @relation(fields: [warehouseId], references: [id])
+  items            InvoiceItem[]
+  returns          Return[]
+  order            SalesOrder?
+
+  payments         Payment[]
+  paymentAllocations PaymentAllocation[]
+  @@unique([createdById, idempotencyKey])
+  @@index([customerId, invoiceDate])
+  @@index([representativeId, invoiceDate])
+  @@index([status])
+  @@index([updatedAt])
+  @@map("invoices")
+}
+
+// quantity = sold quantity; bonusQuantity is free goods (never billed). lineTotal = netAmount + taxAmount.
+model InvoiceItem {
+  id                    String        @id @default(uuid())
+  invoiceId             String
+  productId             String
+  quantity              Int
+  bonusQuantity         Int           @default(0)
+  unitPrice             Int
+  discountType          DiscountType?
+  discountValue         Int           @default(0)
+  grossAmount           Int
+  discountAmount        Int           @default(0)
+  netAmount             Int
+  taxRateBp             Int           @default(0)
+  taxAmount             Int           @default(0)
+  lineTotal             Int
+  bonusRuleSnapshot     Json?
+  batchId               String?
+  returnedQuantity      Int           @default(0)
+  bonusReturnedQuantity Int           @default(0)
+  invoice               Invoice       @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product               Product       @relation(fields: [productId], references: [id])
+  returnItems           ReturnItem[]
+
+  batchAllocations InvoiceItemBatch[]
+  @@index([invoiceId])
+  @@index([productId])
+  @@map("invoice_items")
+}
+
+model Return {
+  id           String       @id @default(uuid())
+  returnNumber String       @unique
+  invoiceId    String
+  customerId   String
+  warehouseId  String
+  returnDate   DateTime     @default(now())
+  creditAmount Int          @default(0)
+  billedAmount Int          @default(0)
+  policy       String
+  reason       String?
+  notes        String?
+  deviceId     String?
+  localId      String?
+  createdById  String?
+  createdAt    DateTime     @default(now())
+  invoice      Invoice      @relation(fields: [invoiceId], references: [id])
+  customer     Customer     @relation(fields: [customerId], references: [id])
+  warehouse    Warehouse    @relation(fields: [warehouseId], references: [id])
+  items        ReturnItem[]
+
+  @@unique([deviceId, localId])
+  @@index([invoiceId])
+  @@index([customerId])
+  @@map("returns")
+}
+
+model ReturnItem {
+  id            String        @id @default(uuid())
+  returnId      String
+  invoiceItemId String
+  productId     String
+  lineType      LineType
+  quantity      Int
+  amount        Int           @default(0)
+  condition     ItemCondition @default(Valid)
+  restocked     Boolean       @default(false)
+  required      Boolean       @default(false)
+  return        Return        @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  invoiceItem   InvoiceItem   @relation(fields: [invoiceItemId], references: [id])
+  product       Product       @relation(fields: [productId], references: [id])
+
+  @@index([returnId])
+  @@index([invoiceItemId])
+  @@map("return_items")
+}
+
+// ───────── Phase 5: inventory (batches, purchases, transfers, adjustments) ─────────
+
+enum PurchaseStatus { Draft Ordered Received Cancelled }
+enum AdjustmentReason { Stocktake Damage Expired Correction Loss Other }
+
+// Stock.quantity = SUM(batch quantities) + "unbatched" remainder (legacy/opening stock without a batch).
+model StockBatch {
+  id               String   @id @default(uuid())
+  warehouseId      String
+  productId        String
+  batchNumber      String
+  expiryDate       DateTime? @db.Date
+  quantity         Int      @default(0)
+  cost             Int      @default(0)
+  sourcePurchaseId String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  warehouse        Warehouse @relation(fields: [warehouseId], references: [id])
+  product          Product   @relation(fields: [productId], references: [id])
+  allocations      InvoiceItemBatch[]
+
+  @@unique([warehouseId, productId, batchNumber])
+  @@index([expiryDate])
+  @@index([productId])
+  @@map("stock_batches")
+}
+
+// Which batches an invoice line was taken from (FEFO), so returns go back to the right batch.
+model InvoiceItemBatch {
+  id                    String      @id @default(uuid())
+  invoiceItemId         String
+  batchId               String?
+  quantity              Int
+  bonusQuantity         Int         @default(0)
+  returnedQuantity      Int         @default(0)
+  bonusReturnedQuantity Int         @default(0)
+  createdAt             DateTime    @default(now())
+  invoiceItem           InvoiceItem @relation(fields: [invoiceItemId], references: [id], onDelete: Cascade)
+  batch                 StockBatch? @relation(fields: [batchId], references: [id])
+
+  @@index([invoiceItemId])
+  @@index([batchId])
+  @@map("invoice_item_batches")
+}
+
+model PurchaseOrder {
+  id            String              @id @default(uuid())
+  orderNumber   String              @unique
+  companyId     String
+  warehouseId   String
+  orderDate     DateTime            @default(now())
+  status        PurchaseStatus      @default(Draft)
+  subtotal      Int                 @default(0)
+  discountTotal Int                 @default(0)
+  total         Int                 @default(0)
+  notes         String?
+  createdById   String?
+  receivedById  String?
+  receivedAt    DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  company       Company             @relation(fields: [companyId], references: [id])
+  warehouse     Warehouse           @relation(fields: [warehouseId], references: [id])
+  items         PurchaseOrderItem[]
+
+  @@index([companyId])
+  @@index([status])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderItem {
+  id               String        @id @default(uuid())
+  purchaseOrderId  String
+  productId        String
+  quantity         Int
+  bonusQuantity    Int           @default(0)
+  unitCost         Int
+  discountAmount   Int           @default(0)
+  lineTotal        Int
+  purchaseOrder    PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  product          Product       @relation(fields: [productId], references: [id])
+
+  @@index([purchaseOrderId])
+  @@map("purchase_order_items")
+}
+
+model StockTransfer {
+  id              String              @id @default(uuid())
+  transferNumber  String              @unique
+  fromWarehouseId String
+  toWarehouseId   String
+  notes           String?
+  createdById     String?
+  createdAt       DateTime            @default(now())
+  fromWarehouse   Warehouse           @relation("TransferFrom", fields: [fromWarehouseId], references: [id])
+  toWarehouse     Warehouse           @relation("TransferTo", fields: [toWarehouseId], references: [id])
+  items           StockTransferItem[]
+
+  @@map("stock_transfers")
+}
+
+model StockTransferItem {
+  id          String        @id @default(uuid())
+  transferId  String
+  productId   String
+  batchNumber String?
+  expiryDate  DateTime?     @db.Date
+  quantity    Int
+  transfer    StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  product     Product       @relation(fields: [productId], references: [id])
+
+  @@index([transferId])
+  @@map("stock_transfer_items")
+}
+
+model StockAdjustment {
+  id               String                @id @default(uuid())
+  adjustmentNumber String                @unique
+  warehouseId      String
+  reason           AdjustmentReason
+  notes            String?
+  createdById      String?
+  createdAt        DateTime              @default(now())
+  warehouse        Warehouse             @relation(fields: [warehouseId], references: [id])
+  items            StockAdjustmentItem[]
+
+  @@map("stock_adjustments")
+}
+
+model StockAdjustmentItem {
+  id             String          @id @default(uuid())
+  adjustmentId   String
+  productId      String
+  batchNumber    String?
+  quantityDelta  Int
+  systemQuantity Int?
+  adjustment     StockAdjustment @relation(fields: [adjustmentId], references: [id], onDelete: Cascade)
+  product        Product         @relation(fields: [productId], references: [id])
+
+  @@index([adjustmentId])
+  @@map("stock_adjustment_items")
+}
+
+// ───────── Phase 6: payments (collections) ─────────
+
+enum PaymentMethod { Cash Bank Transfer Other }
+enum PaymentDocStatus { Confirmed Cancelled }
+
+// A payment reduces the customer's balance by its full amount. It is then allocated to invoices
+// (oldest first, or a chosen one); any remainder stays as credit "on account" until allocated.
+model Payment {
+  id               String           @id @default(uuid())
+  paymentNumber    String           @unique
+  customerId       String
+  invoiceId        String?
+  amount           Int
+  allocatedAmount  Int              @default(0)
+  method           PaymentMethod
+  paymentDate      DateTime         @default(now())
+  referenceNumber  String?
+  representativeId String?
+  receivedById     String?
+  notes            String?
+  status           PaymentDocStatus @default(Confirmed)
+  cancelledAt      DateTime?
+  cancelledById    String?
+  cancelReason     String?
+  deviceId         String?
+  localId          String?
+  createdAt        DateTime         @default(now())
+  customer         Customer         @relation(fields: [customerId], references: [id])
+  invoice          Invoice?         @relation(fields: [invoiceId], references: [id])
+  representative   Representative?  @relation(fields: [representativeId], references: [id])
+  allocations      PaymentAllocation[]
+
+  @@unique([deviceId, localId])
+  @@index([customerId, paymentDate])
+  @@index([representativeId, paymentDate])
+  @@index([status, paymentDate])
+  @@map("payments")
+}
+
+model PaymentAllocation {
+  id        String   @id @default(uuid())
+  paymentId String
+  invoiceId String
+  amount    Int
+  createdAt DateTime @default(now())
+  payment   Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id])
+
+  @@index([paymentId])
+  @@index([invoiceId])
+  @@map("payment_allocations")
+}
+
+// ───────── Phase 8: offline sync ─────────
+
+enum SyncStatus { Pending Applied Conflict Rejected Failed Discarded }
+
+// Every operation a device pushes is stored with its full payload and is NEVER deleted:
+// a conflict or rejection is reviewed by a manager, not dropped (SRS §36).
+model SyncOperation {
+  id              String     @id @default(uuid())
+  userId          String
+  deviceId        String
+  localId         String
+  opType          String
+  payload         Json
+  status          SyncStatus @default(Pending)
+  serverId        String?
+  errorCode       String?
+  errorMessage    String?
+  errorDetails    Json?
+  attempts        Int        @default(0)
+  clientCreatedAt DateTime?
+  resolvedById    String?
+  resolution      String?
+  resolutionNote  String?
+  processedAt     DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@unique([deviceId, localId])
+  @@index([status, createdAt])
+  @@index([userId, status])
+  @@map("sync_operations")
+}
+
+// ───────── Phase 9: notifications ─────────
+
+// In-app inbox. dedupeKey (unique per user) makes recurring checks idempotent: one "near expiry" notice per day, however often the job runs.
+model Notification {
+  id        String    @id @default(uuid())
+  userId    String
+  type      String
+  title     String
+  body      String
+  data      Json?
+  dedupeKey String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, readAt, createdAt])
+  @@map("notifications")
+}

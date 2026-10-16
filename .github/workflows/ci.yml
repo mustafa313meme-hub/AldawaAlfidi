@@ -1,0 +1,96 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci_password
+          POSTGRES_DB: silverpharma_ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ci -d silverpharma_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql://ci:ci_password@localhost:5432/silverpharma_ci?schema=public
+      JWT_SECRET: ci-jwt-secret-ci-jwt-secret-ci-jwt-secret-0001
+      JWT_REFRESH_SECRET: ci-refresh-secret-ci-refresh-secret-ci-0002
+      SEED_ADMIN_USERNAME: admin
+      SEED_ADMIN_PASSWORD: CiAdminPassw0rd!
+      PORT: '3000'
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install
+        run: npm install --no-audit --no-fund
+      - name: Prisma client
+        run: npx prisma generate
+      - name: Unit tests
+        run: npm test
+      - name: Build (type-check)
+        run: npm run build
+      - name: Create schema (fresh test database)
+        run: |
+          npx prisma db push --skip-generate --accept-data-loss
+          npx prisma db execute --file prisma/sql/audit_append_only.sql --schema prisma/schema.prisma
+          npx prisma db execute --file prisma/sql/constraints.sql --schema prisma/schema.prisma
+      - name: Seed
+        run: npm run db:seed
+      - name: Start API
+        run: |
+          node dist/main.js > ../../api.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -sf http://localhost:3000/api/v1/health && exit 0
+            sleep 2
+          done
+          echo "API did not start"; cat ../../api.log; exit 1
+      - name: Acceptance test (SRS §116 + integrity and concurrency)
+        working-directory: .
+        env:
+          API_URL: http://localhost:3000/api/v1
+          ADMIN_USER: admin
+          ADMIN_PASSWORD: CiAdminPassw0rd!
+        run: node scripts/acceptance-test.mjs
+      - name: API log (on failure)
+        if: failure()
+        working-directory: .
+        run: tail -n 200 api.log || true
+      - name: Dependency audit
+        run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true
+
+  admin-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Client logic (must agree with the server's bonus/credit rules)
+        run: node apps/admin/test/logic.test.mjs
+      - name: Browser tests (Chromium against the mock API)
+        working-directory: apps/admin
+        run: |
+          npm install --no-save --no-audit --no-fund playwright
+          npx playwright install --with-deps chromium
+          node test/ui.test.cjs
+      - name: Rep app (PWA) logic + browser tests incl. offline
+        working-directory: apps/rep
+        run: |
+          node test/pricing.test.mjs
+          node test/ui.test.cjs

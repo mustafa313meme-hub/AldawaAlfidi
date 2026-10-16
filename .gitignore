@@ -1,0 +1,16 @@
+node_modules
+dist
+.env
+*.log
+coverage
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+*.tsbuildinfo
